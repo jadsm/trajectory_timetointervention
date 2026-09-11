@@ -11,6 +11,7 @@ from datetime import datetime
 from multiprocessing import Pool
 
 reload = True
+suffix = '111_aj'
 
 # Basic configuration
 logging.basicConfig(filename=f'logs/Surv_{datetime.now().strftime("%Y%m%d_%H%M%S")}_pred.log',level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
 
-    models_df = pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/time_prediction/data/results_strat_xgbmaepo_weighted_all6_no_imputation.csv')
+    models_df = pd.read_csv('data/results_best_strat_xgbmaepo_weighted_all111_margin_aj_final1080_2920_2.csv')
     # models_df.groupby(['test_fold','method','dataset'])['Cindex_test_uncensored'].describe()
-    models_df = models_df.query('is_best_trial == True and dataset in ("demo", "classes_neqm")')
+    # models_df = models_df.query('is_best_trial == True and dataset in ("demo", "classes_neqm")')
     # combine both ,"demo+classes_neqm"
     # aux = models_df.query('dataset == "classes_neqm"')
     # aux['dataset'] = "demo+classes_neqm"
@@ -41,8 +42,7 @@ if __name__ == '__main__':
     # models_df = models_df.loc[:2,:]
 
     # load data
-    fixed_args = load_data() + tuple([logger])
-    input_data = (tuple([row])+fixed_args for ri,row in models_df.iterrows())
+    input_data = (tuple([row]) + load_data(row.dataset,row.method) + tuple([logger]) for _,row in models_df.iterrows())
 
     if paralell:
         # compute all data
@@ -53,6 +53,7 @@ if __name__ == '__main__':
         res = []
         for pars in input_data:
             res.append(train_all_methods_wrapper(*pars))
+            a = 0
     
     # decode the results
     results,summary,dfpred = [],[],[]
@@ -63,9 +64,10 @@ if __name__ == '__main__':
     results = pd.concat(results,axis=0,ignore_index=True)
     summary = pd.concat(summary,axis=0,ignore_index=True)
     dfpred = pd.concat(dfpred,axis=0,ignore_index=True)
-    results.to_csv('data/acc_curve_simulation_last0_5Final_newclass63mice.csv',index=False)
-    summary.to_csv('data/summary_database_rotation_best_last0_5Final_newclass63mice.csv',index=False)
-    dfpred.to_csv('data/predictions_last0_5Final_newclass63mice.csv',index=False)
+    # posthoc analysis - calculation of p-values
+    results.to_csv(f'data/acc_curve_simulation_last0_5Final_newclass{suffix}.csv',index=False)
+    summary.to_csv(f'data/summary_database_rotation_best_last0_5Final_newclass{suffix}.csv',index=False)
+    dfpred.to_csv(f'data/predictions_last0_5Final_newclass{suffix}.csv',index=False)
 
     # summary_sum = summary.loc[:,['method',	'dataset',
     #                'PredIn90_test_uncensored','PredIn180_test_uncensored','PredIn360_test_uncensored',

@@ -1,24 +1,25 @@
 # create base visualisation
 import os
 import sys
-sys.path.append('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/app')
+sys.path.append('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/app')
 import pandas as pd 
 import pandas_gbq as pdg
 from utils.constants import *
-from utils.utils import *
+# from utils.utils import *
 import numpy as np
 import altair as alt
 from scipy.optimize import curve_fit
 import re
 
 ############## this is the final
-path = '/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/data/master_final_0807.csv'
-df_master = pd.read_csv(path,encoding='latin_1',low_memory=False)
+fulldatapath = '/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/data'
+df_master = pd.read_csv(fulldatapath+'/master_final_0807.csv',encoding='latin_1',low_memory=False)
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/juandelgado/Desktop/Juan/code/imperial/creds/google_credentials_als.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/jdelgad1/Desktop/Juan/code/.creds/creds-als.json"
 
 # read data
-df = pd.read_csv('data/ALS.TWeight_classes.csv')
+# df = pd.read_csv('data/ALS.TWeight_classes.csv')
+df = pd.read_csv('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/data/TALSFRS_classes.csv')
 
 # verticalise the data
 poss_id_vars = ['Database', 'numid','tcens', 'variable']
@@ -76,13 +77,19 @@ def estimate_delay(df,threshold = .05):
     dfout['threshold'] = threshold
     return dfout
 
+df.plot(x='days_from_onset',y='RelDeltaW',kind='scatter',alpha=.1)
+
 delay05 = estimate_delay(df,threshold = .05)
 delay10 = estimate_delay(df,threshold = .1)
 
 # convert delay dictionary to dataframe
-pd.concat([delay05,delay10],axis=0).to_csv('data/weight_delay_dataset2.csv',index=False)
+dfout = pd.concat([delay05,delay10],axis=0).merge(df_master.loc[:,['Database','numid','tcens','cens','Dead']],on='numid')
+dfout['event_code'] = 2*dfout['Dead'].fillna(0)+(dfout['cens']==0).astype(float)
+dfout.loc[dfout.loc[:,'event_code']>2,'event_code'] = 1
+dfout['event_code'] = dfout['event_code'].astype(int)
+dfout.to_csv(fulldatapath+'/weight_delay_dataset2.csv',index=False)
 
-pd.concat([delay05,delay10],axis=0).merge(df_master.loc[:,['numid','tcens','cens']],on='numid').to_csv('data/weight_delay_dataset_cens.csv',index=False)
+# pd.concat([delay05,delay10],axis=0).merge(df_master.loc[:,['numid','tcens','cens','Dead']],on='numid').to_csv(fulldatapath+'/weight_delay_dataset_cens.csv',index=False)
 
 # plot them
 dfx = df.merge(delay05,on='numid').groupby(['days_from_onset','threshold_reached','numid'])['DeltaW'].mean().reset_index()
@@ -98,22 +105,23 @@ alt.Chart(dfx).mark_line().encode(x=alt.X('days_from_onset:Q').title('Days'),
 print('Weightloss values in Kg by group')
 print(df.merge(delay05,on='numid').groupby(['threshold_reached'])['DeltaW'].describe().reset_index())
 
-aux = pd.concat([delay05,delay10],axis=0)
-aux = aux.query('threshold_reached == 1').groupby('threshold')['delay'].describe().reset_index()
-base = alt.Chart(aux).encode(y='threshold')
-dots = base.mark_circle(x='50%')
-bars = base.mark_bar(x='25%',
-                     x2='75%')
-(dots+bars).save('aaab.html')
+# aux = pd.concat([delay05,delay10],axis=0)
+# aux = aux.query('threshold_reached == 1').groupby('threshold')['delay'].describe().reset_index()
+# base = alt.Chart(aux).encode(y='threshold')
+# dots = base.mark_circle(x='50%')
+# bars = base.mark_bar(x='25%',
+#                      x2='75%')
+# (dots+bars).save('aaab.html')
 
 
 df.drop(columns=['w0','DeltaW'],inplace=True)
 df_out = df.merge(delay05,on='numid').rename(columns={'threshold_reached':'cl2'})
 df_out = df_out.drop_duplicates().dropna(subset=['RelDeltaW'])
+df_out = df_out.query('RelDeltaW<.5').reset_index(drop=True)
 aa = df_out.groupby(['days_from_onset','cl2'])['RelDeltaW'].describe().reset_index()
 aa['lowCI'] = aa['mean']-1.96*aa['std']/np.sqrt(aa['count'])
 aa['highCI'] = aa['mean']+1.96*aa['std']/np.sqrt(aa['count'])
-aa.to_csv('data/weight_decay_dataset_cens.csv',index=False)
+aa.to_csv(fulldatapath+'/weight_decay_dataset_cens.csv',index=False)
 
 # df_out.to_csv('data/ALS.TWeight_classes_enriched.csv',index=False)
 # pdg.to_gbq(df_out,'ALS.TWeight_classes',project_id='imperial-410612',if_exists='replace')

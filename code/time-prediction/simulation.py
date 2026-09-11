@@ -12,13 +12,18 @@ import numpy as np
 import time
 import altair as alt
 from utils.constants import *
+import copy
+from utils.utils_censor import build_competing_surv_array,get_po_times
+from sksurv.util import Surv
+from sksurv.metrics import concordance_index_ipcw
+from itertools import combinations
 
 logging.basicConfig(filename=f'logs/simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}_pred.log',level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Create a logger
 logger = logging.getLogger(__name__)
 
-simulations = [1]
+simulations = [4]
 recompute_flag = True
 
 def gastro_ever(df_combo):
@@ -31,17 +36,28 @@ def gastro_ever(df_combo):
 if 0 in simulations:
 # Simulation 0: weight calculation from weight_delay_dataset2 - imperial-als/fit_relu_weights_sandbox.py
     bootstraps = 100
-    df = pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/data/weight_delay_dataset2.csv')
-    df2 =  pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/data/master_final_0807.csv')
-    df2 = df2.loc[:,['Database','id','tcens','cens']].rename(columns={'id':'numid'})
+    df = pd.read_csv('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/data/weight_delay_dataset2.csv')
+    # df2 =  pd.read_csv('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/data/master_final_0807.csv')
+    # df2 = df2.loc[:,['Database','id','tcens','cens']].rename(columns={'id':'numid'})
     df = df.query('threshold == 0.1')
 
-    df = df2.merge(df,on='numid')
-
+    # df = df2.merge(df,on='numid',how='outer')
+    
+    df['delay'] = df['delay'].fillna(1080.)
+    df['threshold_reached'] = df['threshold_reached'].fillna(0.)
+    df['threshold'] = 0.1
+    # calculate pseudo-observations
+    df.loc[df['threshold_reached']==0,'delay'] = TAU#1825.
+    
     df_unc = df.query('cens == 0')
 
     # calculate metrics of the two models
-    def calc_metrics_wrapper(L,li):
+    def one_vs_rest(df,col='Database'):
+        """Yield (name, group, rest) for each level of `col`: 1 vs all the others."""
+        for name, group in df.groupby(col):
+            yield name, group, df.loc[df[col] != name]
+
+    def calc_metrics_wrapper(L,li,Ltrain=None):
         L = L.reset_index(drop=True)
         n = L.shape[0]
         D = []
@@ -49,7 +65,15 @@ if 0 in simulations:
             idx = np.arange(n)
             np.random.shuffle(idx)
             idx = idx[:int(n*.5)]
-            metrics_test = cal_metrics(L.loc[idx,'tcens'],L.loc[idx,'delay'])
+            ynow = build_competing_surv_array(L.loc[idx,'tcens'],L.loc[idx,'event_code'])
+            t_po = get_po_times(ynow)        
+            metrics_test = cal_metrics(L.loc[idx,'tcens'].to_numpy(),L.loc[idx,'delay'].to_numpy(),t_po)
+
+            survival_train = Surv.from_arrays(time=Ltrain['tcens'], event=Ltrain['event_code']==1)
+            survival_test = Surv.from_arrays(time=L.loc[idx,'tcens'].to_numpy(), event=L.loc[idx,'event_code'].to_numpy()==1)
+            metrics_test.update({'Cindex_ipcw':concordance_index_ipcw(survival_train=survival_train, 
+                                                                    survival_test=survival_test,
+                                                estimate=L.loc[idx,'delay'], tau=TAU)[0]}) 
             dfnow = pd.DataFrame(metrics_test,index=[0])
             D.append(dfnow)
         dfnow = pd.concat(D,axis=0,ignore_index=True)
@@ -62,12 +86,75 @@ if 0 in simulations:
         dfnow = dfnow.T
         dfnow['test_rotation'] = li
         return dfnow
-    dfout = pd.concat([calc_metrics_wrapper(L,li) for li,L in df_unc.groupby('Database')],axis=0)
-    dfout.to_csv('data/results_weight_naive_model.csv')
+    dfout = pd.concat([calc_metrics_wrapper(L,li,Ltrain) for li,L,Ltrain in one_vs_rest(df,'Database')],axis=0)
+    dfout.to_csv('data/results_weight_naive_model3.csv')
+
+if 7 in simulations:
+    from utils.utils_censor import p_value_from_ci,methods,datasets
+    from itertools import combinations, product
+    best_results = pd.read_csv('data/summary_database_rotation_best_last0_5Final_newclass94.csv')
+
+# calculate pvalues
+    pairs = list(combinations(list(product(methods, datasets)), 2))
+    pvals = []
+    for test_fold in best_results.test_fold.unique():
+        for pair in pairs:
+            for var in ['Cindex','MedianAE']:#,'MeanAEPO','MedianAEPO'
+                a = best_results.query(f'test_fold=="{test_fold}" & method=="{pair[0][0]}" & dataset=="{pair[0][1]}"')
+                b = best_results.query(f'test_fold=="{test_fold}" & method=="{pair[1][0]}" & dataset=="{pair[1][1]}"')
+                pnow = p_value_from_ci(a[f'{var}_mean'].values[0],[a[f'{var}_lb'].values[0],a[f'{var}_ub'].values[0]],
+                                                                b[f'{var}_mean'].values[0],[b[f'{var}_lb'].values[0],b[f'{var}_ub'].values[0]])
+                pvals.append(list(pair)+[test_fold,var,pnow[0]])  
+    
+    pvals = pd.DataFrame(pvals,columns=['pair1','pair2','test_fold','variable','p_value'])
+    pvals.to_csv('data/p_values_94.csv',index=False)
+
+if 8 in simulations: 
+
+    TAU = 1080
+    paths = [f"data/t_vs_tpo_{TAU}.csv",f"data/t_vs_tmargin_{TAU}.csv"]
+    def read_plot(path,varname = 't_po',crop_t = 2920):
+        yname = "t" +varname.split('_')[1] + " (years)"
+        df = pd.read_csv(path)
+        df.sort_values(by='t', inplace=True)
+        df[varname] = df[varname]/365.25
+        df['t'] = df['t']/365.25
+        df['n_gastro'] = df['event'].cumsum()
+        df.reset_index(drop=True,inplace=True)
+        df.reset_index(drop=False,inplace=True)
+        df.rename(columns={'index': 'n_atrisk'}, inplace=True)
+        df['n_atrisk'] = df['n_atrisk'].max() -df['n_atrisk']
+        df['pct_atrisk'] =  df['n_atrisk']/df['n_atrisk'].max()*100
+        df = df.query(f't <= {crop_t/365.25}')
+        base = alt.Chart(df).encode(x=alt.X('t', axis=alt.Axis(tickCount=5),title='tcens (years)',scale=alt.Scale(domain=[df['t'].min(), df['t'].max()], nice=False)))
+        bar = base.mark_line(color='gray', opacity=0.8).encode(y=alt.Y('pct_atrisk', axis=alt.Axis(orient='right', tickCount=3),title='Percentage at risk (%)'),tooltip=alt.Tooltip(['n_atrisk','t','pct_atrisk']))
+        # event False -> solid, event True -> thinner dashed; Okabe-Ito colour-blind-safe blue/vermillion
+        event_domain = [False,True]
+        line = base.mark_line().encode(y=alt.Y(varname, axis=alt.Axis(tickCount=3, title=yname)),
+                                    color=alt.Color('event:N', scale=alt.Scale(domain=event_domain, range=['#0173B2', '#DE8F05']), legend=None),
+                                    strokeDash=alt.StrokeDash('event:N', scale=alt.Scale(domain=event_domain, range=[[1, 0], [5, 3]]), legend=None),
+                                    strokeWidth=alt.StrokeWidth('event:N', scale=alt.Scale(domain=event_domain, range=[4, 3]), legend=None))
+        # diagonal = base.mark_line(color='black', strokeDash=[5, 5], strokeWidth=1).encode(y=alt.Y('t', axis=alt.Axis(title=yname)))
+        tau_line = alt.Chart(pd.DataFrame({'t': [TAU/365.25]})).mark_rule(color='black', strokeDash=[1, 1]).encode(x='t')
+        chart = alt.layer(bar, alt.layer(line, tau_line)).resolve_scale(y='independent').interactive()
+        chart = chart.configure_axis(labelFontSize=16, titleFontSize=16).configure_title(fontSize=20)
+        chart.save(f'figures/t_vs_{varname}{TAU}.html')
+        return df
+
+    df = read_plot(paths[0],varname='t_po')
+    df1 = read_plot(paths[1],varname='t_margin',crop_t = 2920)
+
+    # 5.5% still at risk
+    # TAU = 1825
+    df1.drop(columns=['t'], inplace=True)
+    df1.columns = [c+"_margin" if 'margin' not in c else c for c in df1.columns ]
+
+    df2 = pd.concat([df,df1],axis=1)
+    alt.Chart(df2).mark_line().encode(x='t_po',y='t_margin',color='event').save(f'figures/t_po_t_margin{TAU}.html')
 
 if 5 in simulations:
     # descriptive analysis
-    df2 =  pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/data/master_final_0807.csv')
+    df2 =  pd.read_csv('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/data/master_final_0807.csv')
     idx = ~df2.loc[:,['Death_Date', 'Outcome_Date']].isna().all(axis=1)
 
     df2.loc[idx, 'last_follow_up'] = np.nan
@@ -224,7 +311,7 @@ if 1 in simulations:
     dfnew['gastrostomy_proba3'] = dfnew['gastrostomy_proba3'].map({0:'Unlikely',1:'Possible'})
     df_combo = pd.concat([df_combo,dfnew['gastrostomy_proba3']],axis=1)    
 
-    # df_combo.to_csv('data/death_preds_gastro_probs6.csv',index=False)
+    df_combo.to_csv('data/death_preds_gastro_probs6.csv',index=False)
 
     g = df_combo.groupby('gastrostomy_proba')
     print('probabilities of gastro by proba dist:',g['lbl'].value_counts()/g['lbl'].count())
@@ -281,7 +368,7 @@ if 1 in simulations:
                     make_df_now(fpr_th,tpr_th,'threshold'),
                     # make_df_now(fpr_svm,tpr_svm,'svm'),
                     make_df_now(fpr_w,tpr_w,'weight')],axis=0)
-    d['method'] = d['method'].replace({'threshold':'diagonal'})
+    d['method'] = d['method'].replace({'threshold':'earlier event'})
     
     diagonal_line = alt.Chart(pd.DataFrame({'fpr': [0, 1], 'tpr': [0, 1]})).mark_line(color='black',size=.5).encode(x='fpr', y='tpr')
     lines = alt.Chart(d).mark_line().encode(x=alt.X('fpr',axis=alt.Axis(tickCount=3)).title('False Positive Rate'),
@@ -302,7 +389,19 @@ if 1 in simulations:
                                 tooltip = ['count','lbl','gastrostomy_proba3'])
     # text = base.mark_text().encode(text='count',y=alt.Y('sum(count)'))
     (bars).configure_legend(disable=False).properties(width=150).save('figures/proportions32.html')
+    
+    
+    # create 
+    aux['gastrostomy_proba3'] = aux['gastrostomy_proba3'].map({'Possible':'Gastrostomy\nmore likely','Unlikely':'Death\nmore likely'})
+    aux['count'] = np.round(aux['count'],2)
+    base = alt.Chart(aux).encode(y=alt.Y('gastrostomy_proba3').title('Predicted'),
+                                            x=alt.X('lbl').title('True').sort(['Gastrostomy', 'Overall survival','Loss follow up' ]))
+    rect = base.mark_rect().encode(color=alt.Color('count').scale(alt.Scale(scheme='blues')))
 
+    text = base.mark_text(align='center', baseline='middle', dx=0, dy=0,color='white').encode(text='count')
+
+    (rect+text).configure_legend(disable=True).properties(width=300,height=220).configure_text(fontSize=14).configure_axis(labelFontSize=14,titleFontSize=14).save('figures/confusion_matrix32.html')
+    
 # for cutoff in np.arange(-720,720,90):
 #     df_combo['gastrostomy_proba2'] = pd.cut(df_combo['gastrostomy_pred']-df_combo['death_pred'],[-np.inf,cutoff,np.inf], 
 #                                                 labels=["Possible", "Unlikely"])
@@ -391,17 +490,12 @@ if 2 in simulations:
     if recompute_flag:
         O = []
         for model in ['XGBoostCox','XGBoostMAEPOReg']:
-            for dataset in ['classes_neqm']:
+            for dataset in ['onset_slope']:
                 tic = time.time()
-                fixed_args = load_data()
-                _,Xg,yg,strat_var,feature_names = select_model_and_features(dataset,model,fixed_args[0],fixed_args[1],fixed_args[3],fixed_args[4],logger)
-                fixed_args = load_data(suffix='63_2')
-                _,Xg2,yg2,strat_var2,_ = select_model_and_features(dataset,model,fixed_args[0],fixed_args[1],fixed_args[3],fixed_args[4],logger)
-                fixed_args = load_data(suffix='63_4')
-                _,Xg4,yg4,strat_var4,_ = select_model_and_features(dataset,model,fixed_args[0],fixed_args[1],fixed_args[3],fixed_args[4],logger)
-                fixed_args = load_data(suffix='63_6')
-                _,Xg6,yg6,strat_var6,_ = select_model_and_features(dataset,model,fixed_args[0],fixed_args[1],fixed_args[3],fixed_args[4],logger)
-                
+                _,Xg,yg,_,strat_var,feature_names = load_data(dataset,model)
+                _,Xg2,yg2,_,strat_var2,_ = load_data(dataset,model,suffix='83_2')
+                _,Xg4,yg4,_,strat_var4,_ = load_data(dataset,model,suffix='83_4')
+                _,Xg6,yg6,_,strat_var6,_ = load_data(dataset,model,suffix='83_6')
                 print('load the data:',model,dataset,time.time() - tic)
                 
                 for database in ['PROACT','ArQ','IDPP']:
@@ -436,9 +530,9 @@ if 2 in simulations:
                     print('compute forward performance data:',model,dataset,database,time.time() - tic)
 
         out = pd.concat(O,axis=0,ignore_index=True)
-        out.to_csv('data/forward_propagation_results63.csv',index=False)
+        out.to_csv('data/forward_propagation_results83.csv',index=False)
     else:
-        out = pd.read_csv('data/forward_propagation_results63.csv')
+        out = pd.read_csv('data/forward_propagation_results83.csv')
 
     selected_cols = {'MedianAE_test_uncensored':'MedianAE','Cindex_test_uncensored':'Cindex'}
     outsimple = out.groupby(['model','features','n_points'])[list(selected_cols.keys())].mean().reset_index(drop=False)
@@ -449,7 +543,7 @@ if 2 in simulations:
                                     tooltip=['n_points','value','model','features','variable'])
     dots = base.mark_circle()
     lines = base.mark_line().encode(strokeDash='features')
-    (dots+lines).facet(column=alt.Column('variable',title=None)).resolve_scale(y='independent').save('figures/forward_prop_sensitivity63.html')
+    (dots+lines).facet(column=alt.Column('variable',title=None)).resolve_scale(y='independent').save('figures/forward_prop_sensitivity83.html')
 
     # Simulation 3: Sensitivity analysis - feature sensitivity - Permutation importance
 if 3 in simulations:
@@ -515,35 +609,40 @@ if 4 in simulations:
 # load data, models
     if recompute_flag:
         Out = pd.DataFrame()
-        fixed_args = load_data()
+        
         # models_df = pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/time_prediction/data/results_strat_xgbmaepo_weighted_all6_no_imputation.csv')
         # models_df = models_df.query('is_best_trial == True and dataset in ("demo", "classes_neqm")')
         
-        for f in ['classes_neqm']:
-            for m in ['XGBoostMAEPOReg','XGBoostCox']:
+        for f in ['onset_slope']:
+            for m in ['XGBoostRegPO','XGBoostCox']:
                 for db in ['PROACT','ArQ','IDPP']:
+                    fixed_args = load_data(f,m)
                     with open(f'models/gastro_{m}_{f}_{db}.pkl', 'rb') as fid:
                         clf_gastro = pickle.load(fid)
 
-                    print('baseline missingness',"{:.2f}".format(fixed_args[0].isna().sum().sum()/fixed_args[0].size*100),'%')
+                    print('baseline missingness',"{:.2f}".format(np.isnan(fixed_args[1]).sum().sum()/np.size(fixed_args[1])*100),'%')
                     
                     # get random missingness
-                    notnans = fixed_args[0].notna()
+                    notnans = ~np.isnan(fixed_args[1])
                     for remove_pct in [.1,.2,.3,.5]:
                         for test_fold_id in range(3):
                             # try:
                             if True:
-                                Xnow = fixed_args[0].copy()
-                                samples_to_remove = notnans.sum()*remove_pct//1
-                                for col in notnans.keys():
-                                    idxs = np.where(notnans[col])[0]
+                                Xnow = copy.deepcopy(fixed_args[1])
+                                samples_to_remove = notnans.sum(axis=0)*remove_pct//1
+                                for col in np.arange(Xnow.shape[1]):
+                                    idxs = np.where(notnans[:,col])[0]
                                     np.random.shuffle(idxs)
                                     idxnow = idxs[:int(samples_to_remove[col])]
-                                    Xnow.loc[idxnow,col] = np.nan
-                                print('baseline missingness',"{:.2f}".format(Xnow.isna().sum().sum()/fixed_args[0].size*100),'%')
+                                    Xnow[idxnow,col] = np.nan
+                                print('new missingness',"{:.2f}".format(np.isnan(Xnow).sum()/fixed_args[1].size*100),'%')
                                 
                                 # get baseline model/data
-                                _,Xg,yg,strat_var,_ = select_model_and_features(f,m,Xnow,fixed_args[1],fixed_args[3],fixed_args[4],logger,export_feature_names=False)
+                                # _,Xg,yg,strat_var,_ = select_model_and_features(f,m,Xnow,fixed_args[2],fixed_args[3],fixed_args[4])
+                                Xg = copy.deepcopy(Xnow)
+                                yg = copy.deepcopy(fixed_args[2])
+                                strat_var = copy.deepcopy(fixed_args[4])
+                                # dataset,method,X0,y00,strat_var0,feature_key,export_feature_names = False
                                 
                                 # get the train test split
                                 # idx_test = (strat_var==db).reshape(-1,)
@@ -565,7 +664,9 @@ if 4 in simulations:
                                 test_uncensored = np.array([yy[0] for yy in y_test])
 
                                 # eval
-                                out = calc_all_metrics(pd.DataFrame(),None,clf_gastro,None,dtrain_valid_combined, dtest,[train_uncensored,test_uncensored])
+                                labels_with_po_train,labels_with_po_test = get_po_times(y[train_valid_idx]),get_po_times(y[test_idx])
+                                calc_all_metrics(study,model_obj,test_fold_id,dtrain_valid_combined,dtest,labels_with_po,trials_to_compute=[])
+                                out = calc_all_metrics(None,clf_gastro,None,dtrain_valid_combined, dtest)
                                 out['model'] = m
                                 out['features'] = f
                                 out['test_database'] = db
@@ -576,9 +677,9 @@ if 4 in simulations:
             # Out.to_csv('data/missingness_test63.csv',index=False)
                             # except Exception as e:
                             #     print(e)
-        Out.to_csv('data/missingness_test63.csv',index=False)
+        Out.to_csv('data/missingness_test111.csv',index=False)
     else:
-        Out = pd.read_csv('data/missingness_test63.csv')
+        Out = pd.read_csv('data/missingness_test83.csv')
     
     Out2 = Out.groupby(['model', 'features',  'remove_pct','test_database']).agg(['mean','std']).reset_index()
     Out2.columns = Out2.columns.map('|'.join).str.strip('|')
@@ -590,25 +691,25 @@ if 4 in simulations:
     line = base.mark_line().encode(strokeDash='features')
     errorbar = base.mark_errorbar().encode(y=alt.Y('MedianAE_lb').title('MedianAE'),
                                         y2='MedianAE_ub')
-    (line+dots+errorbar).facet(column=alt.Column('test_database', title=None)).save('figures/sensitivity_missingness63.html')
+    (line+dots+errorbar).facet(column=alt.Column('test_database', title=None)).save('figures/sensitivity_missingness111.html')
 
 
 if 6 in simulations: 
     # plot all the individual predictions
-    df = pd.read_csv('/Users/juandelgado/Desktop/Juan/code/imperial/imperial-als/time_prediction/data/summary_database_rotation_best_last0_5Final_indiv62.csv')
+    df = pd.read_csv('/Users/jdelgad1/Desktop/Juan/code/imperial/imperial-als/time_prediction/data/summary_database_rotation_best_last0_5Final_indivindiv111_aj.csv')
 
     # select best database
-    cols = ['feature','Cindex_mean', 'Cindex_lb', 'Cindex_ub',
-        'MedianAE_mean', 'MedianAE_lb', 'MedianAE_ub']
+    cols = ['feature','Cindex_ipcw_mean', 'Cindex_ipcw_lb', 'Cindex_ipcw_ub',
+        'MedianAEPO_test_mean', 'MedianAEPO_test_lb', 'MedianAEPO_test_ub']
     df = df.loc[:,cols]
-    dfa = df.sort_values(by=['Cindex_mean'],ascending=False)
+    # dfa = df.sort_values(by=['Cindex_ipcw_mean'],ascending=False)
     # select only neq
     # idx = df['feature'].apply(lambda x: x.endswith('_eq'))
     # idx2 = df['feature'].str.contains('_\d+', regex=True)
     # idx = np.any(np.array([idx,idx2]),axis=0)
     # idx[14] = False
     # dfb = df.loc[~idx,:].sort_values(by=['Cindex_mean'],ascending=False)
-    dfb = df.sort_values(by=['Cindex_mean'],ascending=False)
+    dfb = df.sort_values(by=['Cindex_ipcw_mean'],ascending=False)
     dfb = dfb.rename(columns={c:c.split('_')[-1] for c in dfb.keys()})
 
     aux1 = dfb.iloc[:,:4]
@@ -621,18 +722,27 @@ if 6 in simulations:
     dfb['feature'] = dfb['feature'].str.replace('_',' ')
     
     # take the mean by variable
-    idx = dfb['feature'].apply(lambda x: x.find('neqm')!=-1)
-    dfb.loc[idx,'feature']  = dfb.loc[idx,'feature'].apply(lambda x: x[:x.find(' ord cl neqm')]+" decline class")
+    # dfb.loc[:,'feature']  = dfb.loc[:,'feature'].apply(lambda x: x[:x.find(' ord cl neqm')]+" decline class")
     dfb = dfb.groupby(['feature','variable']).median().reset_index().sort_values(by=['variable','mean'],ascending=False)
     
+    # select only the incumbent features
+    vars_to_remove = ['Database PROACT', 'Clinical','site onset Other','Database IDPP','sex Male','Database ArQ']
+    idx = dfb['feature'].isin(vars_to_remove)
+    # apply(lambda x:x.find('Database')==-1 and x.find('Clinical')==-1)
+    dfb = dfb.loc[~idx,:]
+
     dfb['feature'] = dfb['feature'].replace({'ALSFRS Slope Onset to FirstALSFRS':'ALSFRS Slope Onset',
-                            'ALSFRS bulbar Slope Onset to FirstALSFRS':'Bulbar Slope Onset'})
+                            'ALSFRS Slope Onset to FirstBulbar':'Bulbar Slope Onset',
+                            r'ALSFRS Slope Onset to First%FEV':'FEV% Slope Onset',
+                            'ALSFRS Slope Onset to Firstq3':'Q3 Slope Onset',
+                            'ALSFRS Slope Onset to FirstWeight':'Weight Slope Onset',
+                            'weight 1':'5% weightloss'})
     aux = dfb.pivot(index=['feature'],columns=['variable'],values=['mean']).reset_index()
     aux['sorting'] = (aux['mean']['Cindex']+1-(aux['mean']['MedianAE'])/500)/2
     aux = aux.sort_values(by=['sorting'],ascending=False)
     sortingby = aux['feature'].values
 
-    var_label = {'Cindex':'Cindex', 'MedianAE':'MedianAE (days)'}
+    var_label = {'Cindex':'Cindex', 'MedianAE':'Margin MedianAE (days)'}
 
     def get_bars_dots(dfb, variable,no_axis=False):
         y = alt.Y('feature', axis=None) if no_axis else alt.Y('feature')
@@ -648,8 +758,6 @@ if 6 in simulations:
                                                     angle=alt.value(90))
         return (bars+dots)
 
-
     chart1 = get_bars_dots(dfb, 'Cindex')
     chart2 = get_bars_dots(dfb, 'MedianAE',no_axis=True)
-    (chart1 | chart2).resolve_axis(x='independent').resolve_scale(x='independent').configure_legend(disable=True).save('figures/indiv_model_pred_plot63.html')
-
+    (chart1 | chart2).resolve_axis(x='independent').resolve_scale(x='independent').configure_legend(disable=True).save('figures/indiv_model_pred_plot111_aj.html')
