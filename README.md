@@ -5,7 +5,7 @@ This repository contains Python and R code for ALS risk modelling using the ENCA
 
 **January 2025**
 
-**Publication**: Delgado-SanMartin, J. et al. Machine Learning Models for Predicting Gastrostomy Timing in Amyotrophic Lateral Sclerosis. Lancet Digital Health. Submitted Jan 25. Under review.<br> 
+**Publication**: Delgado-SanMartin, J. et al. Modelling Time to Gastrostomy Intervention in Amyotrophic Lateral Sclerosis: A Multi-Cohort Longitudinal Trajectory and Survival Analysis. JMIR Medical Informatics. Submitted Feb 26. Under review.<br> 
 **Authors**: Delgado-SanMartin, J. (Imperial College London), Gupta V. (A*Star Singapore) <br>
 This repository contains portions of other publications:
 - Westeneng, H. J. et al. Prognosis for patients with amyotrophic lateral sclerosis: development and validation of a personalised prediction model. Lancet Neurol 17, 423-433 (2018). https://doi.org/10.1016/S1474-4422(18)30089-9
@@ -15,8 +15,8 @@ We have modified the code to suit our needs, but the authorship has been adequat
 
 # Main Files
 
-## Trajectory analysis - GMM-JM
-
+## Trajectory analysis - GMM-DTSA
+* **MPLUS_Samplescript_JointGrowthAnalysis_DiscreteSurvivalAnalysis.inp** (input file): GMM-DTSA model configuration
 
 ## Gastrostomy prediction
 * **preprocess_datasets.py** (Python Script): preprocesses datasets for use in the modelling pipeline.
@@ -28,12 +28,7 @@ We have modified the code to suit our needs, but the authorship has been adequat
     - **utils.py** (general utilities) and 
     - **parser_utils.py** (utils for the parser).
 * **plot_right_censored.py** (Python Script): generates model result plots for right-censored survival data
-* **simulation.py** (Python Script): simulates data from the model to assess model generalizability and analyse sensitivity.
-
-## Death predictions
-* **ENCALS_risk_modelling.R**  (R Script): performs the core death risk prediction using the ENCALS dataset. 
-* **death_model_eval.py** (Python Script): evaluates the performance of the above mortality model.
-
+* **simulation.py** (Python Script): simulates data from the model to assess model generalizability and analyse sensitivity. It computes other meta-analyses reflected in the manuscript.
 
 **Dependencies**
 
