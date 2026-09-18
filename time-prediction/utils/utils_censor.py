@@ -463,55 +463,6 @@ def xgb_train(*, trial, train_valid_folds, model_obj, valid_metric_func):
 
     return best_score
 
-def xgb_train2(*, trial, train_valid_folds, model_obj, valid_metric_func):
-    params = model_obj.get_params(trial)
-    params.update(model_obj.get_base_params())
-    params['obj'] = 'reg:absoluteerror'
-
-    # 1. Extract functions so they aren't passed inside the params dictionary
-    # fobj_func = params.pop('obj', None)
-    feval_func = params.pop('custom_metric', None)
-
-    # if fobj_func is None or feval_func is None:
-    #     raise ValueError("Missing 'obj' or 'custom_metric' in params.")
-
-    # Tell XGBoost how to treat the custom metric
-    is_maximize = (model_obj.direction == "maximize")
-    
-    fold_scores = []
-    fold_iterations = []
-
-    # 2. Iterate through folds sequentially
-    for fold_id, (dtrain, dvalid) in enumerate(train_valid_folds):
-        
-        # 3. Use the higher-level xgb.train() API
-        bst = xgb.train(
-            params=params,
-            dtrain=dtrain,
-            num_boost_round=MAX_ROUND,  
-            evals=[(dvalid, 'valid')],
-            # obj=fobj_func,
-            custom_metric=feval_func,            # Replaces feval in modern XGBoost
-            maximize=is_maximize,                # Controls early stopping direction
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-            verbose_eval=10 if VERBOSE else False
-        )
-        
-        # Automatically tracks the best score and iteration per fold
-        fold_scores.append(bst.best_score)
-        fold_iterations.append(bst.best_iteration)
-
-    # 4. Aggregate the results across all folds
-    cv_valid_metric = np.mean(fold_scores)
-    
-    # Store the average best iteration so Optuna knows roughly when it stopped
-    best_iteration = int(np.mean(fold_iterations))
-
-    trial.set_user_attr('num_round', best_iteration)
-    trial.set_user_attr('timestamp', time.perf_counter())
-
-    return cv_valid_metric
-
 def xgb_compute_test_pred(*, model_obj,study, dtrain_valid_combined, dtest,params_df=None,trial_num = 'best'):
     if study:
         if trial_num == 'best':
@@ -1500,7 +1451,7 @@ def rank_and_score(l,mode,temp,vars = ['Cindex_test','MedianAE_test']):
 def rank_and_score_weighted(l,mode,temp,vars = ['Cindex_test','MedianAE_test']):
     temp.append(l)
     # temp[-1][f'overall_{mode}_score'] = 1/2*(0.9*l[vars[0]]+1.1*(1-l[vars[1]]/l[vars[1]].max()))
-    cindex_score = (l[vars[0]]-.5)/.5
+    cindex_score = (np.max(l[vars[0]],.5)-.5)/.5
     median_ae_score = 1-(l[vars[1]]/l[vars[1]].max())
     temp[-1][f'overall_{mode}_score'] = (cindex_score*median_ae_score)**0.5
     # get the best on each
